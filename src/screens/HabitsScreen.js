@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, FlatList, StyleSheet } from 'react-native';
 import { FAB, Portal, Dialog, TextInput, Button, Card, IconButton, Text, Chip } from 'react-native-paper';
 import { saveHabits, loadHabits, getLastResetDate, setLastResetDate } from '../utils/storage';
+import habitTrackerAdapter from '../utils/habitTrackerAdapter';
 
 const HabitsScreen = () => {
   const [habits, setHabits] = useState([]);
@@ -18,7 +19,19 @@ const HabitsScreen = () => {
 
   const loadData = async () => {
     const loadedHabits = await loadHabits();
-    setHabits(loadedHabits);
+    // Ensure habits have completions array
+    const habitsWithCompletions = loadedHabits.map(habit => ({
+      ...habit,
+      completions: habit.completions || []
+    }));
+    // Sync habits to tracker module
+    habitTrackerAdapter.syncHabitsToTracker(habitsWithCompletions);
+    // Calculate streaks using the tracker module
+    const habitsWithStreaks = habitsWithCompletions.map(habit => ({
+      ...habit,
+      streak: habitTrackerAdapter.getStreak(habit.id)
+    }));
+    setHabits(habitsWithStreaks);
   };
 
   const checkDailyReset = async () => {
@@ -31,6 +44,7 @@ const HabitsScreen = () => {
       const resetHabits = loadedHabits.map(habit => ({
         ...habit,
         completedToday: false,
+        completions: habit.completions || []
       }));
       setHabits(resetHabits);
       await saveHabits(resetHabits);
@@ -80,10 +94,13 @@ const HabitsScreen = () => {
         streak: 0,
         completedToday: false,
         lastCompleted: null,
+        completions: [],
       };
       updatedHabits = [...habits, newHabit];
     }
 
+    // Sync to tracker module
+    habitTrackerAdapter.syncHabitsToTracker(updatedHabits);
     setHabits(updatedHabits);
     await saveHabits(updatedHabits);
     closeDialog();
@@ -96,23 +113,27 @@ const HabitsScreen = () => {
   };
 
   const toggleHabitCompletion = async (habit) => {
-    const today = new Date().toDateString();
-    let newStreak = habit.streak;
+    const today = new Date();
+    const todayStr = today.toISOString();
+    
+    // Update completions array
+    let updatedCompletions = [...(habit.completions || [])];
     
     if (!habit.completedToday) {
-      // Completing the habit
-      const lastCompleted = habit.lastCompleted ? new Date(habit.lastCompleted).toDateString() : null;
-      const yesterday = new Date(Date.now() - 86400000).toDateString();
-      
-      if (lastCompleted === yesterday || !lastCompleted) {
-        newStreak = habit.streak + 1;
-      } else {
-        newStreak = 1;
-      }
+      // Add completion to tracker and array
+      habitTrackerAdapter.addCompletion(habit.id, today);
+      updatedCompletions.push(todayStr);
     } else {
-      // Uncompleting the habit
-      newStreak = Math.max(0, habit.streak - 1);
+      // Remove completion from tracker and array
+      habitTrackerAdapter.removeCompletion(habit.id, today);
+      updatedCompletions = updatedCompletions.filter(dateStr => {
+        const date = new Date(dateStr);
+        return date.toDateString() !== today.toDateString();
+      });
     }
+
+    // Get the new streak from the tracker module
+    const newStreak = habitTrackerAdapter.getStreak(habit.id);
 
     const updatedHabits = habits.map(h =>
       h.id === habit.id
@@ -120,7 +141,8 @@ const HabitsScreen = () => {
             ...h,
             completedToday: !h.completedToday,
             streak: newStreak,
-            lastCompleted: !h.completedToday ? today : h.lastCompleted,
+            lastCompleted: !h.completedToday ? todayStr : h.lastCompleted,
+            completions: updatedCompletions,
           }
         : h
     );
